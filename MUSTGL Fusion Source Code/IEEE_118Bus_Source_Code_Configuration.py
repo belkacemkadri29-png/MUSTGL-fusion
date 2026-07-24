@@ -706,7 +706,7 @@ if __name__ == "__main__":
         "dropout_rate": 0.5,
         "lambda_reg": 0.1,
         "fusion_hidden_dim": 64,
-        "fusion_epochs": 50,
+        "fusion_epochs": 100,
         "fusion_learning_rate": 0.01,
         "esn_reservoir_size": 200,
         "esn_spectral_radius": 0.96,
