@@ -1,0 +1,56 @@
+clear; clc; close all;
+define_constants;
+
+mpc = loadcase('case57');
+nbus    = size(mpc.bus,1);
+nbranch = size(mpc.branch,1);
+ngen    = size(mpc.gen,1);
+
+nsamples = 37500;
+
+dataset = [];
+
+for k = 1:nsamples
+    L0 = mpc.bus(:, PD);
+    rand_factor = 0.9 + (1.1 - 0.9) .* rand(size(L0));
+    perturbed_load = L0 .* rand_factor;
+    mpc.bus(:, PD) = perturbed_load;
+
+    results = rundcpf(mpc);
+
+    Pg = results.gen(:, PG);
+    Pd = results.bus(:, PD);
+    injections = zeros(nbus,1);
+    for g = 1:ngen
+        bus_id = results.gen(g, GEN_BUS);
+        injections(bus_id) = injections(bus_id) + Pg(g);
+    end
+    injections = injections - Pd;
+
+    flows = results.branch(:, PF);
+
+    theta = results.bus(:, VA);
+
+    row = [injections' flows' theta'];
+    dataset = [dataset; row];
+end
+
+inj_names = arrayfun(@(i) sprintf('inj_bus%d', i), 1:nbus, 'UniformOutput', false);
+
+count = zeros(nbus, nbus);
+flow_names = cell(1, nbranch);
+for i = 1:nbranch
+    f = results.branch(i,F_BUS);
+    t = results.branch(i,T_BUS);
+    count(f,t) = count(f,t) + 1;
+    flow_names{i} = sprintf('flow_line%d_%d_%d', f, t, count(f,t));
+end
+
+theta_names = arrayfun(@(i) sprintf('theta_bus%d', i), 1:nbus, 'UniformOutput', false);
+feature_names = [inj_names, flow_names, theta_names];
+
+T = array2table(dataset, 'VariableNames', feature_names);
+filename = 'IEEE_57_Bus_System.xlsx';
+writetable(T, filename);
+
+disp('Dataset generated and saved to Excel!');
