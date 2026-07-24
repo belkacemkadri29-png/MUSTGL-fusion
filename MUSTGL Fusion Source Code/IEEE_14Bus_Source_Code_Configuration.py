@@ -12,41 +12,18 @@ from sklearn.linear_model import Ridge
 import time
 from typing import Tuple, Dict, List
 
-# ============================================================================
-# DEVICE — DÉTECTION AUTOMATIQUE GPU (A100 / T4 / CPU fallback)
-# ============================================================================
-
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"[DEVICE] Utilisation de : {DEVICE}")
+print(f"Using device: : {DEVICE}")
 if torch.cuda.is_available():
-    print(f"[DEVICE] GPU détecté : {torch.cuda.get_device_name(0)}")
-    print(f"[DEVICE] Mémoire totale : {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    print(f"GPU detected: {torch.cuda.get_device_name(0)}")
+    print(f"[DEVICE] Total memory : {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
 
-    # ------------------------------------------------------------------
-    # Déterminisme strict sur GPU : garantit que deux runs GPU avec la
-    # même seed donnent EXACTEMENT les mêmes résultats (utile pour ton
-    # évaluation multi-seed). N'assure PAS l'identité bit-à-bit avec le
-    # CPU (l'ordre de calcul GPU/CPU diffère structurellement), mais
-    # élimine la variance résiduelle entre deux exécutions GPU.
-    # Doit être fait AVANT toute allocation/opération CUDA.
-    # ------------------------------------------------------------------
     import os
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-    # warn_only=True : certaines opérations (ex. certains backwards de BatchNorm/
-    # matrix_power sur GPU) n'ont pas encore d'implémentation déterministe dans
-    # PyTorch et lèveraient une RuntimeError bloquante avec warn_only=False.
-    # warn_only=True applique le déterminisme partout où c'est possible et se
-    # contente d'un avertissement (au lieu de planter) pour le reste — c'est le
-    # réglage recommandé pour un pipeline complexe comme celui-ci.
     torch.use_deterministic_algorithms(True, warn_only=True)
-    print("[DEVICE] Mode déterministe GPU activé (CUBLAS_WORKSPACE_CONFIG + use_deterministic_algorithms, warn_only=True)")
 
-# ============================================================================
-# SEED — FIXE L'INITIALISATION DES PARAMÈTRES (GPU T4/A100 Colab)
-# ============================================================================
 
 def set_seeds(seed=215):
-    """Fixe toutes les sources d'aléatoire pour reproductibilité sur GPU"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -56,34 +33,12 @@ def set_seeds(seed=215):
     torch.backends.cudnn.benchmark = False
 
 
-# Liste des seeds à évaluer (peut être surchargée à l'appel de run_multi_seed_evaluation)
 DEFAULT_SEEDS = [215, 1024, 702, 31, 75]
 
-# Appel global au démarrage (sera re-fixée à chaque fit() de toute façon)
 set_seeds(DEFAULT_SEEDS[0])
 
-# ============================================================================
-# ECHO STATE NETWORK IMPLEMENTATION — VERSION 100% TORCH / GPU
-# ============================================================================
-#
-# CHANGEMENT CLÉ vs version CPU :
-#   L'ancienne implémentation faisait, à CHAQUE pas de temps :
-#       input_np = input_t.detach().cpu().numpy()   <-- va-et-vient GPU->CPU
-#       np.dot(...)                                  <-- calcul en NumPy (CPU)
-#       torch.tensor(...)                             <-- retour CPU->GPU
-#   C'était donc systématiquement bloqué sur CPU, quel que soit le device
-#   demandé, et en plus très lent (sync GPU<->CPU par pas de temps).
-#
-#   Ici, W_in / W_reservoir / bias / state sont des tenseurs torch qui
-#   restent sur `device` du début à la fin. Le calcul (matmul + tanh)
-#   tourne entièrement sur GPU si device='cuda'. On ne repasse en NumPy
-#   qu'une seule fois à la fin (pour Ridge / IsolationForest, qui sont
-#   des algos sklearn, donc CPU par nature).
-# ============================================================================
 
 class EchoStateNetwork:
-    """Echo State Network (ESN) pour l'extraction de représentations temporelles — torch/GPU"""
-
     def __init__(self,
                  input_size: int,
                  reservoir_size: int = 100,
@@ -103,15 +58,12 @@ class EchoStateNetwork:
         self.leak_rate = leak_rate
         self.device = device
 
-        # Matrice de poids d'entrée — initialisée avec seed fixée (NumPy pour rester
-        # 100% identique bit-à-bit à la version CPU d'origine, puis transférée sur device)
         W_in = np.random.uniform(
             -input_scaling,
             input_scaling,
             (reservoir_size, input_size)
         )
 
-        # Matrice de poids récurrente — initialisée avec seed fixée
         W_reservoir = np.random.randn(reservoir_size, reservoir_size)
         mask = np.random.rand(reservoir_size, reservoir_size) > sparsity
         W_reservoir[~mask] = 0
@@ -124,7 +76,6 @@ class EchoStateNetwork:
 
         bias = np.random.uniform(-0.1, 0.1, reservoir_size)
 
-        # --- Tout le calcul se fait ensuite en torch, sur `device` ---
         self.W_in = torch.tensor(W_in, dtype=torch.float32, device=device)
         self.W_reservoir = torch.tensor(W_reservoir, dtype=torch.float32, device=device)
         self.bias = torch.tensor(bias, dtype=torch.float32, device=device)
@@ -132,11 +83,9 @@ class EchoStateNetwork:
         self.state = torch.zeros(reservoir_size, dtype=torch.float32, device=device)
 
     def reset_state(self):
-        """Réinitialise l'état interne du réservoir"""
         self.state = torch.zeros(self.reservoir_size, dtype=torch.float32, device=self.device)
 
     def forward_step(self, input_t: torch.Tensor) -> torch.Tensor:
-        """Un pas de temps du réservoir — reste entièrement sur `device`, aucun aller-retour CPU"""
         if not isinstance(input_t, torch.Tensor):
             input_t = torch.tensor(input_t, dtype=torch.float32)
         input_t = input_t.to(self.device)
@@ -153,8 +102,6 @@ class EchoStateNetwork:
         return self.state
 
     def forward_sequence(self, X: torch.Tensor, return_states: bool = True) -> torch.Tensor:
-        """Traite une séquence complète, séquentiellement (dépendance temporelle),
-        mais sans jamais quitter le GPU entre les pas de temps."""
         X = X.to(self.device)
         sequence_length = X.shape[0]
         self.reset_state()
@@ -173,8 +120,6 @@ class EchoStateNetwork:
 
 
 class ESNTemporalRepresentation:
-    """Wrapper pour utiliser l'ESN dans le pipeline de détection d'anomalies"""
-
     def __init__(self,
                  input_size: int,
                  hidden_dim: int,
@@ -209,14 +154,10 @@ class ESNTemporalRepresentation:
             device=device
         )
 
-        # Readout layer — entraîné avec régression Ridge (sklearn = CPU par nature)
         self.readout = Ridge(alpha=default_config['ridge_alpha'])
         self.is_trained = False
 
     def train_readout(self, X: torch.Tensor, target: torch.Tensor = None):
-        """Entraîne la couche readout avec régression linéaire (Ridge).
-        Le passage dans le réservoir tourne sur GPU ; seul le fit final de
-        Ridge (sklearn) nécessite un passage en NumPy/CPU, une seule fois."""
         print("  [Training ESN Readout...]")
 
         reservoir_states = self.esn.forward_sequence(X, return_states=True)
@@ -233,7 +174,6 @@ class ESNTemporalRepresentation:
         print("  [ESN Readout Trained]")
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        """Interface compatible avec le code existant"""
         reservoir_states = self.esn.forward_sequence(X, return_states=True)
 
         if self.is_trained:
@@ -249,13 +189,9 @@ class ESNTemporalRepresentation:
         return H_temporal
 
 
-# ============================================================================
-# FEATURE INDICES (57 bus system)
-# ============================================================================
-
-INJ_IDX   = list(range(0,118))
-FLOW_IDX  = list(range(118,186))
-THETA_IDX = list(range(186,422))
+INJ_IDX   = list(range(0,14))
+FLOW_IDX  = list(range(14,20))
+THETA_IDX = list(range(20,48))
 
 def physical_constraints_loss(A, lambda1=0.1, lambda2=0.1):
     inj   = torch.tensor(INJ_IDX,   dtype=torch.long, device=A.device)
@@ -272,13 +208,7 @@ def physical_constraints_loss(A, lambda1=0.1, lambda2=0.1):
     return lambda1 * symmetry_loss + lambda2 * causal_loss
 
 
-# ============================================================================
-# ANOMALY DETECTION PIPELINE WITH ESN — GPU AWARE
-# ============================================================================
-
 class AnomalyDetectionPipeline:
-    """Pipeline intégré pour la détection d'anomalies spatiotemporelle avec ESN"""
-
     def __init__(self, config: Dict, device: torch.device = DEVICE):
         self.config = config
         self.device = device
@@ -299,10 +229,9 @@ class AnomalyDetectionPipeline:
         self.batch_norm = None
         self.dropout = None
         self.esn_model = None
-        self.seed = None  # dernière seed utilisée pour fit()
+        self.seed = None
 
     def learn_adjacency_matrix(self, X: torch.Tensor) -> torch.Tensor:
-        """Étape 1: Apprentissage de la matrice d'adjacence"""
         print("\n[Adjacency Training]")
         X_transposed = X.T
         num_features, N = X_transposed.shape
@@ -350,7 +279,6 @@ class AnomalyDetectionPipeline:
         return self.adjacency_matrix
 
     def train_spatial_representation(self, X: torch.Tensor) -> torch.Tensor:
-        """Étape 2: Apprentissage de la représentation spatiale (GCN)"""
         print("\n[Spatial Training]")
         N, num_features = X.shape
         A = self.adjacency_matrix
@@ -398,7 +326,6 @@ class AnomalyDetectionPipeline:
         return H.detach()
 
     def train_temporal_representation(self, X: torch.Tensor) -> torch.Tensor:
-        """Étape 3: Apprentissage de la représentation temporelle (ESN)"""
         print("\n[ESN Training]")
         N, num_features = X.shape
         hidden_dim = self.config['hidden_dim']
@@ -428,7 +355,6 @@ class AnomalyDetectionPipeline:
 
     def train_fusion_network(self, H_spatial: torch.Tensor, H_temporal: torch.Tensor,
                            X: torch.Tensor) -> torch.Tensor:
-        """Étape 4: Entraînement du réseau de fusion"""
         print("\n[Fusion]")
         class AdaptiveFusionNN(nn.Module):
             def __init__(self, input_dim, hidden_dim):
@@ -467,9 +393,6 @@ class AnomalyDetectionPipeline:
         return H_fused
 
     def setup_anomaly_detector_unsupervised(self, X_train: torch.Tensor, H_fused_train: torch.Tensor):
-        """Configuration du détecteur d'anomalies (Unsupervised).
-        IsolationForest est un algo sklearn : il ne tourne que sur CPU/NumPy,
-        donc on convertit ici, une seule fois, en toute fin de pipeline GPU."""
         residuals = (X_train - H_fused_train).detach()
 
         self.residuals_std = residuals.std(dim=0, unbiased=True)
@@ -483,7 +406,6 @@ class AnomalyDetectionPipeline:
         print(f"  Std résidus      : {residuals_np.std():.4f}")
         print(f"  Max abs résidus  : {np.abs(residuals_np).max():.4f}")
 
-        # ✅ random_state = seed courante (celle passée à fit()) — reproductible par seed
         self.isolation_forest = IsolationForest(
             contamination='auto',
             n_estimators=100,
@@ -496,7 +418,6 @@ class AnomalyDetectionPipeline:
         return residuals_np
 
     def detect_anomalies(self, X: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
-        """Détection d'anomalies sur nouvelles données"""
         H_spatial = self._get_spatial_representation(X)
         H_temporal = self._get_temporal_representation(X)
 
@@ -519,7 +440,6 @@ class AnomalyDetectionPipeline:
         return anomalies, IF_scores
 
     def _get_spatial_representation(self, X: torch.Tensor) -> torch.Tensor:
-        """Calcul de la représentation spatiale pour nouvelles données"""
         N, num_features = X.shape
         A = self.adjacency_matrix
         K = self.config['gcn_hops']
@@ -539,22 +459,15 @@ class AnomalyDetectionPipeline:
         return H
 
     def _get_temporal_representation(self, X: torch.Tensor) -> torch.Tensor:
-        """Calcul de la représentation temporelle pour nouvelles données"""
         with torch.no_grad():
             H_temporal = self.esn_model.forward(X)
         return H_temporal
 
     def fit(self, X_train: np.ndarray, seed: int = 215):
-        """Entraînement complet du pipeline pour une seed donnée"""
-
         self.seed = seed
-        # ✅ SEED FIXÉE ICI — avant toute initialisation de paramètres
         set_seeds(seed)
 
         start_time = time.time()
-        #self.clip_low  = np.percentile(X_train, 3, axis=0)
-        #self.clip_high = np.percentile(X_train, 97, axis=0)
-        #X_train_clipped = np.clip(X_train, self.clip_low, self.clip_high)
 
         X_normalized = self.scaler.fit_transform(X_train)
 
@@ -574,7 +487,6 @@ class AnomalyDetectionPipeline:
 
     def predict(self, X_test: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         start_time = time.time()
-        #X_test_clipped = np.clip(X_test, self.clip_low, self.clip_high)
 
         X_normalized = self.scaler.transform(X_test)
 
@@ -603,7 +515,6 @@ class AnomalyDetectionPipeline:
         return anomalies, scores
 
     def evaluate_performance(self, y_true: np.ndarray, y_pred: np.ndarray, scores: np.ndarray) -> Dict:
-        """Calcul des métriques de performance"""
         precision = precision_score(y_true, y_pred)
         recall = recall_score(y_true, y_pred)
         f1 = f1_score(y_true, y_pred)
@@ -634,14 +545,8 @@ class AnomalyDetectionPipeline:
         return metrics
 
 
-# ============================================================================
-# ÉVALUATION SUR UNE SEULE SEED (inchangé, réutilisable indépendamment)
-# ============================================================================
-
 def run_complete_evaluation(train_path: str, test_path: str, label_column: str,
                              config: Dict, seed: int = 215, device: torch.device = DEVICE):
-    """Évaluation complète du pipeline pour une seed unique"""
-
     df_train_raw = pd.read_excel(train_path)
     X_train = df_train_raw.fillna(0).values.astype(float)
 
@@ -690,26 +595,12 @@ def run_complete_evaluation(train_path: str, test_path: str, label_column: str,
     return pipeline, metrics, results_df
 
 
-# ============================================================================
-# ÉVALUATION MULTI-SEED
-# ============================================================================
-
 def run_multi_seed_evaluation(train_path: str, test_path: str, label_column: str,
                                config: Dict, seeds: List[int] = None,
-                               output_path: str = 'anomaly_detection_results_multiseed.xlsx',
                                device: torch.device = DEVICE):
-    """
-    Lance le pipeline complet (fit + predict + evaluate) une fois par seed,
-    puis agrège les métriques (moyenne, écart-type, min, max) sur l'ensemble
-    des seeds.
-
-    Les données sont chargées une seule fois. Seule l'initialisation aléatoire
-    du pipeline (poids, ESN, Isolation Forest) change à chaque seed.
-    """
     if seeds is None:
         seeds = DEFAULT_SEEDS
 
-    # Chargement des données une seule fois
     df_train_raw = pd.read_excel(train_path)
     X_train_full = df_train_raw.fillna(0).values.astype(float)
 
@@ -768,7 +659,6 @@ def run_multi_seed_evaluation(train_path: str, test_path: str, label_column: str
         print(f"Accuracy:      {metrics['accuracy']:.4f}")
         print("-"*60)
 
-    # ---- Agrégation des métriques sur toutes les seeds ----
     metric_cols = ['precision', 'recall', 'f1_score', 'roc_auc', 'accuracy',
                     'specificity', 'training_time', 'testing_time']
 
@@ -797,38 +687,26 @@ def run_multi_seed_evaluation(train_path: str, test_path: str, label_column: str
     print(summary_df.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
     print("="*70)
 
-    # ---- Sauvegarde Excel : un onglet par seed + résumé ----
-    with pd.ExcelWriter(output_path) as writer:
-        per_seed_df.to_excel(writer, sheet_name='per_seed_metrics', index=False)
-        summary_df.to_excel(writer, sheet_name='summary', index=False)
-        for seed, df in all_results.items():
-            sheet_name = f'predictions_seed_{seed}'[:31]  # limite Excel = 31 car.
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-
-    print(f"\nRésultats sauvegardés dans : {output_path}")
-
     return pipelines, per_seed_df, summary_df
 
 
-
-
 if __name__ == "__main__":
-    train_path = "NEW_118bussystem30000sampl118.xlsx"
-    test_path = "NEW50%118_INJECTIONKADRIBALANCEDstate_50_test_with_attacks_case57.xlsx"
+    train_path = "595FINAL_TRAINING_14_BUS_SYSTEM.xlsx"
+    test_path = "595test_clipped_p2.5_p95.xlsx"
 
     config = {
         "embedding_dim": 512,
         "attention_dim": 64,
         "adj_epochs": 10,
         "adj_learning_rate": 0.01,
-        "gcn_hops": 4,
-        "hidden_dim": 422,
-        "gcn_epochs": 100,
+        "gcn_hops": 3,
+        "hidden_dim": 48,
+        "gcn_epochs": 50,
         "gcn_learning_rate": 0.01,
         "dropout_rate": 0.5,
         "lambda_reg": 0.1,
         "fusion_hidden_dim": 64,
-        "fusion_epochs": 50,
+        "fusion_epochs": 100,
         "fusion_learning_rate": 0.01,
         "esn_reservoir_size": 200,
         "esn_spectral_radius": 0.96,
@@ -848,6 +726,5 @@ if __name__ == "__main__":
         label_column='attack_label',
         config=config,
         seeds=SEEDS,
-        output_path='anomaly_detection_results_multiseed.xlsx',
         device=DEVICE
     )
