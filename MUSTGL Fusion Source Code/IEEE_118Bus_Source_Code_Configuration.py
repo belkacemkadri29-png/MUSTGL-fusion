@@ -189,9 +189,9 @@ class ESNTemporalRepresentation:
         return H_temporal
 
 
-INJ_IDX   = list(range(0,14))
-FLOW_IDX  = list(range(14,20))
-THETA_IDX = list(range(20,48))
+INJ_IDX   = list(range(0,118))
+FLOW_IDX  = list(range(118,186))
+THETA_IDX = list(range(186,422))
 
 def physical_constraints_loss(A, lambda1=0.1, lambda2=0.1):
     inj   = torch.tensor(INJ_IDX,   dtype=torch.long, device=A.device)
@@ -699,14 +699,14 @@ if __name__ == "__main__":
         "attention_dim": 64,
         "adj_epochs": 10,
         "adj_learning_rate": 0.01,
-        "gcn_hops": 3,
-        "hidden_dim": 48,
+        "gcn_hops": 4,
+        "hidden_dim": 422,
         "gcn_epochs": 50,
         "gcn_learning_rate": 0.01,
         "dropout_rate": 0.5,
         "lambda_reg": 0.1,
         "fusion_hidden_dim": 64,
-        "fusion_epochs": 100,
+        "fusion_epochs": 50,
         "fusion_learning_rate": 0.01,
         "esn_reservoir_size": 200,
         "esn_spectral_radius": 0.96,
