@@ -659,8 +659,8 @@ def run_multi_seed_evaluation(train_path: str, test_path: str, label_column: str
 
 
 if __name__ == "__main__":
-    train_path = "BELKANEW_118bussystem30000sampl118 - Copie.xlsx"
-    test_path = "BELKANEW50%118_INJECTIONKADRIBALANCEDstate_50_test_with_attacks_case57.xlsx"
+    train_path = ""
+    test_path = ""
 
     config = {
         "embedding_dim": 512,
