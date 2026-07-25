@@ -401,11 +401,6 @@ class AnomalyDetectionPipeline:
 
         residuals_np = residuals_normalized.cpu().numpy()
 
-        print(f"\n  DIAGNOSTIC RÉSIDUS TRAIN :")
-        print(f"  Mean abs résidus : {np.abs(residuals_np).mean():.4f}")
-        print(f"  Std résidus      : {residuals_np.std():.4f}")
-        print(f"  Max abs résidus  : {np.abs(residuals_np).max():.4f}")
-
         self.isolation_forest = IsolationForest(
             contamination='auto',
             n_estimators=100,
@@ -427,11 +422,6 @@ class AnomalyDetectionPipeline:
         residuals = (X - H_fused).detach()
         residuals_normalized = residuals / self.residuals_std
         residuals_np = residuals_normalized.cpu().numpy()
-
-        print(f"\n  DIAGNOSTIC RÉSIDUS TEST :")
-        print(f"  Mean abs résidus : {np.abs(residuals_np).mean():.4f}")
-        print(f"  Std résidus      : {residuals_np.std():.4f}")
-        print(f"  Max abs résidus  : {np.abs(residuals_np).max():.4f}")
 
         predictions = self.isolation_forest.predict(residuals_np)
         anomalies = (predictions == -1)
@@ -489,21 +479,6 @@ class AnomalyDetectionPipeline:
         start_time = time.time()
 
         X_normalized = self.scaler.transform(X_test)
-
-        print(f"\n  DIAGNOSTIC SCALER TEST :")
-        print(f"  Min après transform : {X_normalized.min():.4f}")
-        print(f"  Max après transform : {X_normalized.max():.4f}")
-
-        n_below_0 = (X_normalized < 0).sum()
-        n_above_1 = (X_normalized > 1).sum()
-        total = X_normalized.size
-        print(f"  Valeurs < 0 : {n_below_0} ({100*n_below_0/total:.2f}%)")
-        print(f"  Valeurs > 1 : {n_above_1} ({100*n_above_1/total:.2f}%)")
-        if n_below_0 + n_above_1 > 0:
-           out_of_range_per_col = ((X_normalized < 0) | (X_normalized > 1)).sum(axis=0)
-           worst_cols = np.argsort(out_of_range_per_col)[::-1][:10]
-           print(f"  Colonnes les plus impactées (index) : {worst_cols}")
-           print(f"  Valeurs extrêmes (index) : {worst_cols} -> max={X_normalized[:, worst_cols].max(axis=0)}")
 
         X = torch.tensor(X_normalized, dtype=torch.float32, device=self.device)
         anomalies, scores = self.detect_anomalies(X)
@@ -623,12 +598,11 @@ def run_multi_seed_evaluation(train_path: str, test_path: str, label_column: str
         X_test_full = X_test_full[:, :min_features]
 
     all_metrics = []
-    all_results = {}
     pipelines = {}
 
     for seed in seeds:
         print("\n" + "#"*70)
-        print(f"#  DÉMARRAGE RUN — SEED = {seed}")
+        print(f"#  SEED = {seed}")
         print("#"*70)
 
         pipeline = AnomalyDetectionPipeline(config, device=device)
@@ -639,12 +613,6 @@ def run_multi_seed_evaluation(train_path: str, test_path: str, label_column: str
         metrics['seed'] = seed
         all_metrics.append(metrics)
 
-        results_df = pd.DataFrame({
-            'true_label': y_test,
-            'predicted_label': y_pred.astype(int),
-            'anomaly_score': test_scores
-        })
-        all_results[seed] = results_df
         pipelines[seed] = pipeline
 
         print("\n" + "-"*60)
@@ -691,17 +659,17 @@ def run_multi_seed_evaluation(train_path: str, test_path: str, label_column: str
 
 
 if __name__ == "__main__":
-    train_path = "595FINAL_TRAINING_14_BUS_SYSTEM.xlsx"
-    test_path = "595test_clipped_p2.5_p95.xlsx"
+    train_path = ""
+    test_path = ""
 
     config = {
         "embedding_dim": 512,
         "attention_dim": 64,
         "adj_epochs": 10,
         "adj_learning_rate": 0.01,
-        "gcn_hops": 2,
-        "hidden_dim": 194,
-        "gcn_epochs": 50,
+        "gcn_hops": 3,
+        "hidden_dim": 48,
+        "gcn_epochs": 100,
         "gcn_learning_rate": 0.01,
         "dropout_rate": 0.5,
         "lambda_reg": 0.1,
